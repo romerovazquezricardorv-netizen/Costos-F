@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FRAICHE · Costos</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#faf7f2;--fg:#222;--card:#fff;--ac:#7b4b94;--bd:#ddd}
+@media(prefers-color-scheme:dark){:root{--bg:#18161a;--fg:#eee;--card:#25222a;--ac:#c79ae0;--bd:#444}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);padding:12px;max-width:1000px;margin:auto}
+h1{font-size:1.3rem;color:var(--ac)}
+.tabs{display:flex;gap:6px;margin-bottom:12px}
+.tabs button{flex:1}
+button{background:var(--ac);color:#fff;border:0;border-radius:8px;padding:9px 12px;font-size:.95rem}
+button.sec{background:transparent;color:var(--ac);border:1px solid var(--ac)}
+button.tab-off{background:transparent;color:var(--fg);border:1px solid var(--bd)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+label{font-size:.8rem;display:block}
+input{width:100%;padding:8px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--fg);font-size:1rem}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.85rem}
+th,td{padding:6px 8px;border-bottom:1px solid var(--bd);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+.warn{color:#c0392b;font-size:.85rem}
+.big{font-size:1.2rem;font-weight:700;color:var(--ac)}
+#lock{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:9}
+#lock .card{width:min(320px,90%)}
+</style>
+</head>
+<body>
+<div id="lock"><div class="card">
+  <h1>FRAICHE</h1>
+  <p id="lockmsg"></p>
+  <input id="pin" type="password" inputmode="numeric" placeholder="PIN">
+  <p><button onclick="unlock()" style="width:100%">Entrar</button></p>
+  <p class="warn" id="lockerr"></p>
+</div></div>
+
+<h1>FRAICHE · Costo por mililitro</h1>
+<div class="tabs">
+  <button id="b1" onclick="tab(1)">Productos</button>
+  <button id="b2" class="tab-off" onclick="tab(2)">Pedido</button>
+  <button id="b3" class="tab-off" onclick="tab(3)">Respaldo</button>
+</div>
+
+<section id="t1">
+  <div class="card">
+    <div class="grid">
+      <div><label>Producto</label><input id="f_nombre"></div>
+      <div><label>Proveedor</label><input id="f_prov"></div>
+      <div><label>Costo por LITRO ($)</label><input id="f_costo" type="number" step="any" inputmode="decimal"></div>
+      <div><label>Margen (%)</label><input id="f_margen" type="number" step="any" value="100" inputmode="decimal"></div>
+      <div><label>Envase (ml)</label><input id="f_env" type="number" step="any" value="50" inputmode="decimal"></div>
+      <div><label>Temporada</label><input id="f_temp"></div>
+    </div>
+    <p><button onclick="guardar()">Guardar / actualizar</button> <button class="sec" onclick="limpiar()">Limpiar</button></p>
+    <p class="warn" id="ferr"></p>
+  </div>
+  <div class="card scroll"><div id="tabla"></div></div>
+</section>
+
+<section id="t2" hidden>
+  <div class="card">
+    <p>Escribe los <b>ml</b> que quieres de cada producto:</p>
+    <div id="pedin" class="grid"></div>
+  </div>
+  <div class="card scroll"><div id="pedout"></div></div>
+</section>
+
+<section id="t3" hidden>
+  <div class="card">
+    <p><button onclick="exportar()">Descargar respaldo (.xlsx)</button></p>
+    <p id="ultimo"></p>
+    <p>Restaurar desde Excel:</p>
+    <input type="file" id="imp" accept=".xlsx">
+    <p class="warn">Tus datos se guardan en este navegador. Descarga un respaldo seguido para no perderlos.</p>
+  </div>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money = n => '$' + Number(n).toLocaleString('es-MX', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d } catch { return d } };
+let prods = load('fraiche_prods', []);
+let hist = load('fraiche_hist', []);
+const persist = () => {
+  localStorage.setItem('fraiche_prods', JSON.stringify(prods));
+  localStorage.setItem('fraiche_hist', JSON.stringify(hist));
+};
+
+/* ---------- Acceso con PIN ---------- */
+async function hash(s) {
+  if (!(window.crypto && crypto.subtle)) return btoa(s);
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+function initLock() {
+  $('lockmsg').textContent = localStorage.fraiche_pin
+    ? 'Escribe tu PIN para entrar.'
+    : 'Crea un PIN para proteger la app (mínimo 4 dígitos).';
+}
+async function unlock() {
+  const p = $('pin').value;
+  if (p.length < 4) { $('lockerr').textContent = 'Mínimo 4 caracteres.'; return; }
+  const h = await hash(p);
+  if (!localStorage.fraiche_pin) localStorage.fraiche_pin = h;
+  if (h === localStorage.fraiche_pin) { $('lock').hidden = true; $('lockerr').textContent = ''; }
+  else $('lockerr').textContent = 'PIN incorrecto.';
+}
+$('pin').addEventListener('keydown', e => { if (e.key === 'Enter') unlock(); });
+
+/* ---------- Cálculos ---------- */
+function calc(p) {
+  const costoMl = p.costo / 1000;
+  const ventaMl = costoMl * (1 + p.margen / 100);
+  return {
+    costoMl, ventaMl,
+    costoEnv: costoMl * p.env,
+    precioEnv: ventaMl * p.env,
+    gananciaEnv: (ventaMl - costoMl) * p.env
+  };
+}
+
+/* ---------- Productos ---------- */
+function tab(n) {
+  [1, 2, 3].forEach(i => {
+    $('t' + i).hidden = i !== n;
+    $('b' + i).className = i === n ? '' : 'tab-off';
+  });
+  if (n === 2) renderPedido();
+  if (n === 3) renderUltimo();
+}
+function limpiar() {
+  ['nombre', 'prov', 'costo', 'temp'].forEach(k => $('f_' + k).value = '');
+  $('f_margen').value = 100; $('f_env').value = 50; $('ferr').textContent = '';
+}
+function guardar() {
+  const p = {
+    nombre: $('f_nombre').value.trim(),
+    prov: $('f_prov').value.trim(),
+    costo: parseFloat($('f_costo').value),
+    margen: parseFloat($('f_margen').value),
+    env: parseFloat($('f_env').value),
+    temp: $('f_temp').value.trim()
+  };
+  if (!p.nombre || !(p.costo >= 0) || !(p.margen >= 0) || !(p.env > 0)) {
+    $('ferr').textContent = 'Revisa nombre, costo, margen y envase.'; return;
+  }
+  upsert(p); persist(); limpiar(); renderTabla();
+}
+function upsert(p) {
+  const i = prods.findIndex(x => x.nombre.toLowerCase() === p.nombre.toLowerCase());
+  const costoAnt = i >= 0 ? prods[i].costo : null;
+  if (i >= 0) prods[i] = p; else prods.push(p);
+  if (costoAnt !== p.costo) hist.push({ fecha: new Date().toISOString().slice(0, 16).replace('T', ' '), nombre: p.nombre, costo: p.costo });
+}
+function editar(i) {
+  const p = prods[i];
+  $('f_nombre').value = p.nombre; $('f_prov').value = p.prov; $('f_costo').value = p.costo;
+  $('f_margen').value = p.margen; $('f_env').value = p.env; $('f_temp').value = p.temp;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+function borrar(i) {
+  if (!confirm('¿Borrar ' + prods[i].nombre + '?')) return;
+  prods.splice(i, 1); persist(); renderTabla();
+}
+function renderTabla() {
+  if (!prods.length) { $('tabla').innerHTML = '<p>Aún no hay productos. Agrega el primero arriba.</p>'; return; }
+  const rows = prods.map((p, i) => {
+    const c = calc(p);
+    return `<tr><td>${esc(p.nombre)}<br><small>${esc(p.prov)} ${p.temp ? '· ' + esc(p.temp) : ''}</small></td>
+      <td>${money(p.costo)}</td><td>${c.costoMl.toFixed(3)}</td><td>${p.margen}%</td>
+      <td>${c.ventaMl.toFixed(3)}</td><td>${p.env} ml</td><td>${money(c.precioEnv)}</td>
+      <td>${money(c.gananciaEnv)}</td>
+      <td><button class="sec" onclick="editar(${i})">Editar</button> <button class="sec" onclick="borrar(${i})">✕</button></td></tr>`;
+  }).join('');
+  $('tabla').innerHTML = `<table><tr><th>Producto</th><th>Costo/L</th><th>Costo/ml</th><th>Margen</th>
+    <th>Venta/ml</th><th>Envase</th><th>Precio envase</th><th>Ganancia</th><th></th></tr>${rows}</table>`;
+}
+
+/* ---------- Pedido ---------- */
+function renderPedido() {
+  $('pedin').innerHTML = prods.map((p, i) =>
+    `<div><label>${esc(p.nombre)}</label><input type="number" min="0" step="any" inputmode="decimal" data-i="${i}" oninput="calcPedido()"></div>`
+  ).join('') || '<p>Primero agrega productos.</p>';
+  calcPedido();
+}
+function calcPedido() {
+  let total = 0, litros = 0;
+  const rows = [...document.querySelectorAll('#pedin input')].map(inp => {
+    const ml = parseFloat(inp.value);
+    if (!(ml > 0)) return '';
+    const p = prods[inp.dataset.i];
+    const envases = Math.ceil(ml / p.env);
+    const mlTot = envases * p.env;
+    const costo = mlTot * p.costo / 1000;
+    total += costo; litros += mlTot / 1000;
+    return `<tr><td>${esc(p.nombre)}</td><td>${esc(p.prov)}</td><td>${ml}</td><td>${p.env} ml</td>
+      <td><b>${envases}</b></td><td>${(mlTot / 1000).toFixed(3)}</td><td>${money(costo)}</td></tr>`;
+  }).join('');
+  $('pedout').innerHTML = rows
+    ? `<table><tr><th>Producto</th><th>Proveedor</th><th>ml</th><th>Envase</th><th>Envases a rellenar</th><th>Litros</th><th>Costo</th></tr>${rows}</table>
+       <p class="big">Total: ${money(total)} · ${litros.toFixed(3)} L</p>`
+    : '<p>Escribe ml arriba para ver el pedido.</p>';
+}
+
+/* ---------- Respaldo Excel ---------- */
+function exportar() {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(prods.map(p => ({
+    nombre: p.nombre, proveedor: p.prov, costo_litro: p.costo, margen_pct: p.margen, envase_ml: p.env, temporada: p.temp
+  }))), 'Productos');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(prods.map(p => {
+    const c = calc(p);
+    return { nombre: p.nombre, costo_ml: +c.costoMl.toFixed(4), venta_ml: +c.ventaMl.toFixed(4),
+      precio_envase: +c.precioEnv.toFixed(2), ganancia_envase: +c.gananciaEnv.toFixed(2) };
+  })), 'Calculos');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hist.map(h => ({ fecha: h.fecha, nombre: h.nombre, costo_litro: h.costo }))), 'Historial');
+  const hoy = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `respaldo_fraiche_${hoy}.xlsx`);
+  localStorage.fraiche_ultimo = hoy; renderUltimo();
+}
+function renderUltimo() {
+  const u = localStorage.fraiche_ultimo;
+  const dias = u ? Math.floor((Date.now() - new Date(u)) / 864e5) : null;
+  $('ultimo').innerHTML = u
+    ? `Último respaldo: ${u}` + (dias > 7 ? ` <span class="warn">(hace ${dias} días, haz uno nuevo)</span>` : '')
+    : '<span class="warn">Aún no has hecho ningún respaldo.</span>';
+}
+$('imp').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const wb = XLSX.read(await f.arrayBuffer());
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['Productos']);
+    rows.forEach(r => upsert({
+      nombre: String(r.nombre).trim(), prov: String(r.proveedor ?? ''), costo: +r.costo_litro,
+      margen: +r.margen_pct, env: +r.envase_ml, temp: String(r.temporada ?? '')
+    }));
+    persist(); renderTabla(); alert(rows.length + ' productos cargados.');
+  } catch { alert('No pude leer ese archivo. Usa un respaldo descargado de esta app.'); }
+  e.target.value = '';
+});
+
+initLock(); renderTabla();
+</script>
+</body>
+</html>
